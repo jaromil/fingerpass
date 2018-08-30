@@ -38,7 +38,7 @@
 #define featurebytes 4096
 
 // can comment out
-#define DEBUG
+// #define DEBUG
 
 // Copieed from mintct in NBIS 5.0 - may introduce binary
 // incompatibility if not aligned to exact library version.
@@ -109,7 +109,6 @@ void bitprint(size_t const size, void const * const ptr) {
 			fprintf(stderr,"%u", byte);
 		}
 	}
-	puts("");
 }
 #endif
 
@@ -284,20 +283,18 @@ int main(void)
 
 #ifdef DEBUG
 		// print all distances
-		// fprintf(stdout,"I:%u \t J:%u \t-\t L:%f \t alpha:%f \t beta:%f\n",
-		//         i,j, delta.L, delta.alpha, delta.beta);
+		fprintf(stdout,"I:%u \t J:%u \t-\t L:%f \t alpha:%f \t beta:%f\n",
+		        i,j, delta.L, delta.alpha, delta.beta);
 #endif
 		j++;
 		if(j>=nmin) { j=0; i++;	}
 	}
 
-#ifdef DEBUG
 	// print quantization boundaries
 	fprintf(stderr,"\nQuantization boundaries:\n L.min:%f \t L.max:%f \n alpha.min:%f \t alpha.max:%f \n beta.min:%f \t beta.max:%f\n\n",
 	        quant_params.L_min, quant_params.L_max,
 	        quant_params.alpha_min, quant_params.alpha_max,
 	        quant_params.beta_min, quant_params.beta_max);
-#endif
 
 	// elevate quantization boundaries to a zero floor
 	const float L_floor = quant_params.L_min<0?-quant_params.L_min:quant_params.L_min;
@@ -326,29 +323,32 @@ int main(void)
 		// F : max = Q : fivebits
 		// Q = (F * fivebits) / max
 		q = sround( (minutiae[c].delta.L * fivebits) /quant_params.L_max);
+		minutiae[c].quantized |= (q&fivebits)<<10;
 #ifdef DEBUG
-		fprintf(stderr,"%u: %f -> %i (%f : %f = %u : %u)\n",
+		fprintf(stderr,"%u-L: \t %f -> %i (%f : %f = %u : %u)\n",
 		        c, minutiae[c].delta.L, q,
 		        minutiae[c].delta.L,quant_params.L_max,q,fivebits);
 #endif
-		minutiae[c].quantized |= q<<10;
 
 		q = sround( (minutiae[c].delta.alpha * fivebits) /quant_params.alpha_max);
+		minutiae[c].quantized |= (q&fivebits)<<5;
 #ifdef DEBUG
-		fprintf(stderr,"%u: %f -> %i (%f : %f = %u : %u)\n",
+		fprintf(stderr,"%u-alpha: \t %f -> %i (%f : %f = %u : %u)\n",
 		        c, minutiae[c].delta.alpha, q,
 		        minutiae[c].delta.alpha,quant_params.alpha_max,q,fivebits);
 #endif
-		minutiae[c].quantized |= q<<5;
 
 		q = sround( (minutiae[c].delta.beta * fivebits) /quant_params.beta_max);
+		minutiae[c].quantized |= (q&fivebits);
+
 #ifdef DEBUG
-		fprintf(stderr,"%u: %f -> %i (%f : %f = %u : %u)\n",
+		fprintf(stderr,"%u-beta: \t %f -> %i (%f : %f = %u : %u)\n",
 		        c, minutiae[c].delta.beta, q,
 		        minutiae[c].delta.beta,quant_params.beta_max,q,fivebits);
+		// also print bitmask of quantized total
+		bitprint(2,&minutiae[c].quantized);
+		fprintf(stderr,"\n\n");
 #endif
-		minutiae[c].quantized |= q;
-
 		// binning of feature vector
 		feature_vector[minutiae[c].quantized / 8] |=
 			0x1 << minutiae[c].quantized % 8;
@@ -364,13 +364,19 @@ int main(void)
 		bitprint(2,&minutiae[c].quantized);
 #endif
 
-	fprintf(stderr,"Fingerprint unique feature sequence:\n--\n");
+	fflush(stderr);
+	fprintf(stderr,"Fingerprint unique feature (HEX sequence):\n--\n");
 	for (c=0;c<featurebytes;c++) {
 		if (i > 0) fprintf(stdout,"%02X",feature_vector[c]);
 	}
+	fflush(stdout);
 	// fprintf(stdout,"\n");
-	fprintf(stderr,"--\n");
-
+	fprintf(stderr,"\n--\n");
+#ifdef DEBUG
+	fprintf(stderr,"Binary representation:\n--\n");
+	bitprint(featurebytes,feature_vector);
+	fprintf(stderr,"\n--\n");
+#endif
 	// r = fp_img_save_to_file(img, "finger.pgm");
 	// if (r) {
 	// 	fprintf(stderr, "img save failed, code %d\n", r);
