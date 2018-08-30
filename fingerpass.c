@@ -4,26 +4,35 @@
  * Copyright (C) 2018 Dyne.org Foundation
  * Ideated and written by Denis Roio <jaromil@dyne.org>
  *
- * Boilerplate derived from the libfprint image capture program
+ * Boilerplate from the libfprint image capture program
  * Copyright (C) 2007 Daniel Drake <dsd@gentoo.org>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * This source code is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
  *
- * This library is distributed in the hope that it will be useful,
+ * This source code is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * Please refer to the GNU Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * You should have received a copy of the GNU Public License along
+ * with this source code; if not, write to: Free Software Foundation,
+ * Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *
  */
 
-
-// This is tested only on Little-Endian machines
+// This software is inspired by the article "A fingerprint based
+// crypto-biometric system for secure communication" by Rudresh
+// Dwivedi, Somnath Dey, Mukul Anand Sharma, Apurv Goel, submitted on
+// 22 May 2018 and available at https://arxiv.org/abs/1805.08399
+//
+// In particular, this software implements the "Feature Extraction"
+// transormation (section 2.1) to compare a number of quantized
+// distance vectors based on NIST-compatible minutiae.
+//
+// This is only tested on Little-Endian machines so far.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -328,7 +337,7 @@ int8_t *minutiae_feature_vector(int8_t *feature_vector,
 
 
 int main(int argc, char **argv) {
-	int r = 1;
+	int res = 1;
 	struct fp_dscv_dev *ddev;
 	struct fp_dscv_dev **discovered_devs;
 	struct fp_dev *dev;
@@ -337,8 +346,8 @@ int main(int argc, char **argv) {
 	setenv ("G_MESSAGES_DEBUG", "none", 0);
 	setenv ("LIBUSB_DEBUG", "0", 0);
 
-	r = fp_init();
-	if (r < 0) {
+	res = fp_init();
+	if (res < 0) {
 		fprintf(stderr, "Failed to initialize libfprint\n");
 		exit(1);
 	}
@@ -382,9 +391,9 @@ int main(int argc, char **argv) {
 	int8_t *vec;
 	for(c=0;c<tries;c++) {
 	
-		r = fp_dev_img_capture(dev, 0, &img);
-		if (r) {
-			fprintf(stderr, "image capture failed, code %d\n", r);
+		res = fp_dev_img_capture(dev, 0, &img);
+		if (res) {
+			fprintf(stderr, "image capture failed, code %d\n", res);
 			goto out_close;
 		}
 
@@ -395,7 +404,9 @@ int main(int argc, char **argv) {
 		fp_minutia **nist_minutiae;
 		int nmin;
 		nist_minutiae = (fp_minutia**)fp_img_get_minutiae(img, &nmin);
-		fprintf(stderr,"%i minutiae extracted from scanned fingerprint\n",nmin);
+		fprintf(stderr,
+		        "%i minutiae extracted from scanned fingerprint\n"
+		        ,nmin);
 
 		vec = calloc(featurebytes,1);
 		minutiae_feature_vector(vec, nist_minutiae, nmin);
@@ -403,9 +414,32 @@ int main(int argc, char **argv) {
 
 		// free working memory
 		fp_img_free(img); // also frees nist_minutiae
-		free(vec); // vector copied in utarray
+		// free(vec); // vector copied in utarray
 	}
 
+	fprintf(stderr,"Comparing features\n");
+	int i,j;	
+	int8_t **l, **r;
+	int eq;
+
+	l = NULL; 
+	for(i=0; i<tries; i++) {
+		l = (int8_t**)utarray_next(vectors,l);
+		if(!l) break;
+		r = NULL;
+		for(j=0;j<tries; j++) {
+			r = (int8_t**)utarray_next(vectors,r);
+			if(!r) break;
+			if(i==j) {
+				fprintf(stderr,"CMP i:%i j:%i\n",i,j);
+				continue; }
+			eq = memcmp(*l,*r,featurebytes); // TODO: constant time cmp
+			// hamming
+			fprintf(stderr,"CMP i:%i j:%i = %i\n",i,j,eq);
+		}
+	}
+
+	fprintf(stderr,"Operation completed\n");
 	utarray_free(vectors); // frees all vectors in array
 
 	// r = fp_img_save_to_file(img, "finger.pgm");
@@ -414,11 +448,11 @@ int main(int argc, char **argv) {
 	// 	goto out_close;
 	// }
 
-	r = 0;
+	res = 0;
 out_close:
 	fp_dev_close(dev);
 out:
 	fp_exit();
-	return r;
+	return(res);
 }
 
