@@ -32,6 +32,8 @@
 
 #include <libfprint/fprint.h>
 
+#include "utarray.h"
+
 // 5 bits provide the optimal error rate and the maximum entropy
 #define fivebits 0x1f // bitmask 00011111
 #define featurebits 32768 // 2^(5*3)
@@ -175,64 +177,9 @@ struct fp_dscv_dev *discover_device(struct fp_dscv_dev **discovered_devs)
 	return ddev;
 }
 
-int main(void)
-{
-	int r = 1;
-	struct fp_dscv_dev *ddev;
-	struct fp_dscv_dev **discovered_devs;
-	struct fp_dev *dev;
-	struct fp_img *img = NULL;
-
-	setenv ("G_MESSAGES_DEBUG", "none", 0);
-	setenv ("LIBUSB_DEBUG", "0", 0);
-
-	r = fp_init();
-	if (r < 0) {
-		fprintf(stderr, "Failed to initialize libfprint\n");
-		exit(1);
-	}
-
-	discovered_devs = fp_discover_devs();
-	if (!discovered_devs) {
-		fprintf(stderr, "Could not discover devices\n");
-		goto out;
-	}
-
-	ddev = discover_device(discovered_devs);
-	if (!ddev) {
-		fp_dscv_devs_free(discovered_devs);
-		fprintf(stderr, "No devices detected.\n");
-		goto out;
-	}
-
-	dev = fp_dev_open(ddev);
-	fp_dscv_devs_free(discovered_devs);
-	if (!dev) {
-		fprintf(stderr, "Could not open device.\n");
-		goto out;
-	}
-
-	if (!fp_dev_supports_imaging(dev)) {
-		fprintf(stderr, "this device does not have imaging capabilities.\n");
-		goto out_close;
-	}
-
-	fprintf(stderr,"Opened device. It's now time to scan your finger.\n\n");
-	
-	r = fp_dev_img_capture(dev, 0, &img);
-	if (r) {
-		fprintf(stderr, "image capture failed, code %d\n", r);
-		goto out_close;
-	}
-
-	// standardization
-	fp_img_standardize(img);
-
-	// extract XYT minutiae points
-	fp_minutia **nist_minutiae;
-	int nmin;
-	nist_minutiae = (fp_minutia**)fp_img_get_minutiae(img, &nmin);
-	fprintf(stderr,"%i minutiae extracted from scanned fingerprint\n",nmin);
+// allocates a new array, needs freeing
+int8_t *minutiae_feature_vector(int8_t *feature_vector,
+                                fp_minutia **nist_minutiae, unsigned int nmin)  {
 	XYT icoord;
 	XYT jcoord;
 
@@ -251,7 +198,7 @@ int main(void)
 	const int iter = (nmin*nmin) - nmin;
 	fprintf(stderr,"%i distance combinations to calculate\n",iter);
 	QMin *minutiae = calloc(iter,sizeof(QMin));
-	fprintf(stderr,"Initialized buffer of %u bytes\n",iter*sizeof(QMin));
+	fprintf(stderr,"Initialized buffer of %lu bytes\n",iter*sizeof(QMin));
 
 	// first loop
 	int c;
@@ -305,9 +252,6 @@ int main(void)
 	quant_params.L_max     += L_floor;
 	quant_params.alpha_max += alpha_floor;
 	quant_params.beta_max  += beta_floor;
-
-	// alocates binned result
-	feature_vector = calloc(featurebytes,1);
 
 	// second loop for quantization and binning
 	int16_t q;
@@ -377,15 +321,99 @@ int main(void)
 	bitprint(featurebytes,feature_vector);
 	fprintf(stderr,"\n--\n");
 #endif
+
+	free(minutiae);
+	return(feature_vector);
+}
+
+
+int main(int argc, char **argv) {
+	int r = 1;
+	struct fp_dscv_dev *ddev;
+	struct fp_dscv_dev **discovered_devs;
+	struct fp_dev *dev;
+	struct fp_img *img = NULL;
+
+	setenv ("G_MESSAGES_DEBUG", "none", 0);
+	setenv ("LIBUSB_DEBUG", "0", 0);
+
+	r = fp_init();
+	if (r < 0) {
+		fprintf(stderr, "Failed to initialize libfprint\n");
+		exit(1);
+	}
+
+	discovered_devs = fp_discover_devs();
+	if (!discovered_devs) {
+		fprintf(stderr, "Could not discover devices\n");
+		goto out;
+	}
+
+	ddev = discover_device(discovered_devs);
+	if (!ddev) {
+		fp_dscv_devs_free(discovered_devs);
+		fprintf(stderr, "No devices detected.\n");
+		goto out;
+	}
+
+	dev = fp_dev_open(ddev);
+	fp_dscv_devs_free(discovered_devs);
+	if (!dev) {
+		fprintf(stderr, "Could not open device.\n");
+		goto out;
+	}
+
+	if (!fp_dev_supports_imaging(dev)) {
+		fprintf(stderr, "this device does not have imaging capabilities.\n");
+		goto out_close;
+	}
+
+	fprintf(stderr,"Opened device. It's now time to scan your finger.\n\n");
+
+	int tries = 8;
+	if(argc>1) tries = atoi(argv[1]);
+
+	// prepare to manage a dynamic array of feature vectors
+	UT_icd vectype = {featurebytes,NULL,NULL,NULL};
+	UT_array *vectors;
+	utarray_new(vectors,&vectype);
+
+	int c;
+	int8_t *vec;
+	for(c=0;c<tries;c++) {
+	
+		r = fp_dev_img_capture(dev, 0, &img);
+		if (r) {
+			fprintf(stderr, "image capture failed, code %d\n", r);
+			goto out_close;
+		}
+
+		// standardization
+		fp_img_standardize(img);
+
+		// extract XYT minutiae points
+		fp_minutia **nist_minutiae;
+		int nmin;
+		nist_minutiae = (fp_minutia**)fp_img_get_minutiae(img, &nmin);
+		fprintf(stderr,"%i minutiae extracted from scanned fingerprint\n",nmin);
+
+		vec = calloc(featurebytes,1);
+		minutiae_feature_vector(vec, nist_minutiae, nmin);
+		utarray_push_back(vectors, &vec); // makes a copy
+
+		// free working memory
+		fp_img_free(img); // also frees nist_minutiae
+		free(vec); // vector copied in utarray
+	}
+
+	utarray_free(vectors); // frees all vectors in array
+
 	// r = fp_img_save_to_file(img, "finger.pgm");
 	// if (r) {
 	// 	fprintf(stderr, "img save failed, code %d\n", r);
 	// 	goto out_close;
 	// }
 
-	fp_img_free(img);
-	free(minutiae);
-	free(feature_vector);
 	r = 0;
 out_close:
 	fp_dev_close(dev);
