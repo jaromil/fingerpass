@@ -22,6 +22,9 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+
+// This is tested only on Little-Endian machines
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -29,7 +32,13 @@
 
 #include <libfprint/fprint.h>
 
-#define fivebit 0x1f // bitmask 00011111
+// 5 bits provide the optimal error rate and the maximum entropy
+#define fivebits 0x1f // bitmask 00011111
+#define featurebits 32768 // 2^(5*3)
+#define featurebytes 4096
+
+// can comment out
+#define DEBUG
 
 // Copieed from mintct in NBIS 5.0 - may introduce binary
 // incompatibility if not aligned to exact library version.
@@ -54,17 +63,28 @@ typedef struct {
 	int t;
 } XYT;
 
+#define base float // base type
+
 typedef struct {
-	float L;
-	float alpha;
-	float beta;
+	base L;
+	base alpha;
+	base beta;
 } VPij;
 
 typedef struct {
+	base L_min, L_max;
+	base alpha_min, alpha_max;
+	base beta_min, beta_max;
+} QP;
+
+typedef struct {
 //	XYT i, j;
-//	VPij delta;
+	VPij delta;
 	int16_t quantized;
 } QMin;
+
+// final binned result
+int8_t *feature_vector;
 
 /* This is the number of integer directions to be used in semicircle. */
 /* CAUTION: If NUM_DIRECTIONS is changed, then the following will     */
@@ -76,6 +96,22 @@ typedef struct {
 #define max(a, b)   ((a) > (b) ? (a) : (b))
 #define min(a, b)   ((a) < (b) ? (a) : (b))
 #define sround(x) ((int) (((x)<0) ? (x)-0.5 : (x)+0.5))
+
+#ifdef DEBUG
+void bitprint(size_t const size, void const * const ptr) {
+	unsigned char *b = (unsigned char*) ptr;
+	unsigned char byte;
+	int i, j;
+
+	for (i=size-1;i>=0;i--) {
+		for (j=7;j>=0;j--) {
+			byte = (b[i] >> j) & 1;
+			fprintf(stderr,"%u", byte);
+		}
+	}
+	puts("");
+}
+#endif
 
 /* minutia_XYT - Converts XYT minutiae attributes in LFS native
         representation to NIST internal representation
@@ -128,11 +164,6 @@ VPij *XYT_distance(VPij *distance, XYT *i, XYT *j) {
 	return distance;
 }
 
-uint16_t distance_quantize(QMin *minutia, VPij *delta) {
-	uint16_t bits;
-	bits = 0x0;
-}
-
 struct fp_dscv_dev *discover_device(struct fp_dscv_dev **discovered_devs)
 {
 	struct fp_dscv_dev *ddev = discovered_devs[0];
@@ -141,7 +172,7 @@ struct fp_dscv_dev *discover_device(struct fp_dscv_dev **discovered_devs)
 		return NULL;
 	
 	drv = fp_dscv_dev_get_driver(ddev);
-	printf("Found device claimed by %s driver\n", fp_driver_get_full_name(drv));
+	fprintf(stderr,"Found device claimed by %s driver\n", fp_driver_get_full_name(drv));
 	return ddev;
 }
 
@@ -187,7 +218,7 @@ int main(void)
 		goto out_close;
 	}
 
-	printf("Opened device. It's now time to scan your finger.\n\n");
+	fprintf(stderr,"Opened device. It's now time to scan your finger.\n\n");
 	
 	r = fp_dev_img_capture(dev, 0, &img);
 	if (r) {
@@ -203,31 +234,152 @@ int main(void)
 	int nmin;
 	nist_minutiae = (fp_minutia**)fp_img_get_minutiae(img, &nmin);
 	fprintf(stderr,"%i minutiae extracted from scanned fingerprint\n",nmin);
-	QMin *minutiae = calloc(nmin,sizeof(QMin));
 	XYT icoord;
 	XYT jcoord;
+
+	// minutiae distance calculation
 	unsigned int i, j;
 	VPij delta;
-	for(i=0; i<nmin; i++) {
-		// fprintf(stdout,"I: x:%i \t y:%i \t t:%i\n",icoord.x, icoord.y, icoord.t);
-		for(j=0; j<nmin; j++) {
-			// fprintf(stdout,"J: x:%i \t y:%i \t t:%i\n",jcoord.x, jcoord.y, jcoord.t);
 
-			if(i==j) continue;
-			XYT_distance( &delta,
-			              minutia_XYT(&icoord, nist_minutiae[i]),
-			              minutia_XYT(&jcoord, nist_minutiae[j]) );
-			fprintf(stdout,"I:%u \t J:%u \t-\t L:%f \t alpha:%f \t beta:%f\n",
-			        i,j, delta.L, delta.alpha, delta.beta);
-		}
+	// quantization boundaries (max, mins)
+	QP quant_params;
+	// init boundaries on first run
+	quant_params.L_min     = quant_params.L_max     = 100;
+	quant_params.alpha_min = quant_params.alpha_max = 0;
+	quant_params.beta_min  = quant_params.beta_max  = 0;
+
+	// quantization store
+	const int iter = (nmin*nmin) - nmin;
+	fprintf(stderr,"%i distance combinations to calculate\n",iter);
+	QMin *minutiae = calloc(iter,sizeof(QMin));
+	fprintf(stderr,"Initialized buffer of %u bytes\n",iter*sizeof(QMin));
+
+	// first loop
+	int c;
+	i = j = 0;
+	for(c=0; c<iter; c++) {
+		if(i==j) j++;
+
+		XYT_distance( &delta,
+		              minutia_XYT(&icoord, nist_minutiae[i]),
+		              minutia_XYT(&jcoord, nist_minutiae[j]) );
+
+#ifdef DEBUG
+		fprintf(stderr,"I:%u \t x:%i \t y:%i \t t:%i\n",i,icoord.x, icoord.y, icoord.t);
+		fprintf(stderr,"J:%u \t x:%i \t y:%i \t t:%i\n",j,jcoord.x, jcoord.y, jcoord.t);
+#endif
+
+		// calculate boundaries
+		quant_params.L_min = min(quant_params.L_min, delta.L);
+		quant_params.L_max = max(quant_params.L_max, delta.L);
+		quant_params.alpha_min = min(quant_params.alpha_min, delta.alpha);
+		quant_params.alpha_max = max(quant_params.alpha_max, delta.alpha);
+		quant_params.beta_min = min(quant_params.beta_min, delta.beta);
+		quant_params.beta_max = max(quant_params.beta_max, delta.beta);
+
+		// save results for second loop
+		minutiae[c].delta.L     = delta.L;
+		minutiae[c].delta.alpha = delta.alpha;
+		minutiae[c].delta.beta  = delta.beta;
+
+#ifdef DEBUG
+		// print all distances
+		// fprintf(stdout,"I:%u \t J:%u \t-\t L:%f \t alpha:%f \t beta:%f\n",
+		//         i,j, delta.L, delta.alpha, delta.beta);
+#endif
+		j++;
+		if(j>=nmin) { j=0; i++;	}
 	}
+
+#ifdef DEBUG
+	// print quantization boundaries
+	fprintf(stderr,"\nQuantization boundaries:\n L.min:%f \t L.max:%f \n alpha.min:%f \t alpha.max:%f \n beta.min:%f \t beta.max:%f\n\n",
+	        quant_params.L_min, quant_params.L_max,
+	        quant_params.alpha_min, quant_params.alpha_max,
+	        quant_params.beta_min, quant_params.beta_max);
+#endif
+
+	// elevate quantization boundaries to a zero floor
+	const float L_floor = quant_params.L_min<0?-quant_params.L_min:quant_params.L_min;
+	const float alpha_floor = quant_params.alpha_min<0?
+		-quant_params.alpha_min:quant_params.alpha_min;
+	const float beta_floor = quant_params.beta_min<0?
+		-quant_params.beta_min:quant_params.beta_min;
+	quant_params.L_max     += L_floor;
+	quant_params.alpha_max += alpha_floor;
+	quant_params.beta_max  += beta_floor;
+
+	// alocates binned result
+	feature_vector = calloc(featurebytes,1);
+
+	// second loop for quantization and binning
+	int16_t q;
+	for(c=0;c<iter;c++) {
+		minutiae[c].quantized = 0x0;
+
+		// elevate floors
+		minutiae[c].delta.L     += L_floor;
+		minutiae[c].delta.alpha += alpha_floor;
+		minutiae[c].delta.beta  += beta_floor;
+
+		// Euclidean reduction
+		// F : max = Q : fivebits
+		// Q = (F * fivebits) / max
+		q = sround( (minutiae[c].delta.L * fivebits) /quant_params.L_max);
+#ifdef DEBUG
+		fprintf(stderr,"%u: %f -> %i (%f : %f = %u : %u)\n",
+		        c, minutiae[c].delta.L, q,
+		        minutiae[c].delta.L,quant_params.L_max,q,fivebits);
+#endif
+		minutiae[c].quantized |= q<<10;
+
+		q = sround( (minutiae[c].delta.alpha * fivebits) /quant_params.alpha_max);
+#ifdef DEBUG
+		fprintf(stderr,"%u: %f -> %i (%f : %f = %u : %u)\n",
+		        c, minutiae[c].delta.alpha, q,
+		        minutiae[c].delta.alpha,quant_params.alpha_max,q,fivebits);
+#endif
+		minutiae[c].quantized |= q<<5;
+
+		q = sround( (minutiae[c].delta.beta * fivebits) /quant_params.beta_max);
+#ifdef DEBUG
+		fprintf(stderr,"%u: %f -> %i (%f : %f = %u : %u)\n",
+		        c, minutiae[c].delta.beta, q,
+		        minutiae[c].delta.beta,quant_params.beta_max,q,fivebits);
+#endif
+		minutiae[c].quantized |= q;
+
+		// binning of feature vector
+		feature_vector[minutiae[c].quantized / 8] |=
+			0x1 << minutiae[c].quantized % 8;
+
+		// minutiae[i].quantized &= (minutiae[i].delta.alpha & fivebits)<<5;
+		// minutiae[i].quantized &= (minutiae[i].delta.beta  & fivebits);
+		// fprintf(stdout,"%u: %i\n",i,minutiae[i].quantized);
+	}
+
+#ifdef DEBUG
+	fprintf(stderr,"Quantized vector:\n");
+	for(c=0;c<iter;c++)
+		bitprint(2,&minutiae[c].quantized);
+#endif
+
+	fprintf(stderr,"Fingerprint unique feature sequence:\n--\n");
+	for (c=0;c<featurebytes;c++) {
+		if (i > 0) fprintf(stdout,"%02X",feature_vector[c]);
+	}
+	// fprintf(stdout,"\n");
+	fprintf(stderr,"--\n");
+
 	// r = fp_img_save_to_file(img, "finger.pgm");
 	// if (r) {
 	// 	fprintf(stderr, "img save failed, code %d\n", r);
 	// 	goto out_close;
 	// }
+
 	fp_img_free(img);
 	free(minutiae);
+	free(feature_vector);
 	r = 0;
 out_close:
 	fp_dev_close(dev);
